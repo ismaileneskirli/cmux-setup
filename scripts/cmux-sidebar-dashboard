@@ -1,0 +1,693 @@
+#!/usr/bin/env bash
+
+set -u
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+cmux_bin="${CMUX_BUNDLED_CLI_PATH:-}"
+if [ -z "$cmux_bin" ] || [ ! -x "$cmux_bin" ]; then
+  cmux_bin="$(command -v cmux 2>/dev/null || true)"
+fi
+jq_bin=$(command -v jq 2>/dev/null || true)
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/cmux-dashboard"
+sidebar_dir="$HOME/.config/cmux/sidebars"
+sidebar_file="$sidebar_dir/productivity.swift"
+
+[ -x "$cmux_bin" ] || exit 0
+[ -n "$jq_bin" ] || exit 0
+
+mkdir -p "$cache_dir" "$sidebar_dir"
+umask 077
+
+remaining_percent() {
+  awk -v used="$1" 'BEGIN { value = 100 - used; if (value < 0) value = 0; if (value > 100) value = 100; printf "%.0f", value }'
+}
+
+remaining_fraction() {
+  awk -v used="$1" 'BEGIN { value = (100 - used) / 100; if (value < 0) value = 0; if (value > 1) value = 1; printf "%.3f", value }'
+}
+
+min_fraction() {
+  awk -v current="$1" -v candidate="$2" 'BEGIN { if (current == "" || candidate < current) print candidate; else print current }'
+}
+
+window_label() {
+  minutes="$1"
+  if [ "$minutes" -le 360 ] 2>/dev/null; then
+    printf '%s' "5h"
+  elif [ "$minutes" -le 10080 ] 2>/dev/null; then
+    printf '%s' "7d"
+  else
+    awk -v minutes="$minutes" 'BEGIN { printf "%.0fd", minutes / 1440 }'
+  fi
+}
+
+reset_text() {
+  label="$1"
+  epoch="$2"
+  if [ "$label" = "5h" ]; then
+    date -r "$epoch" '+%H:%M' 2>/dev/null || true
+  else
+    date -r "$epoch" '+%a %H:%M' 2>/dev/null || true
+  fi
+}
+
+money_from_minor() {
+  amount="$1"
+  exponent="$2"
+  awk -v amount="$amount" -v exponent="$exponent" 'BEGIN {
+    divisor = 1
+    for (i = 0; i < exponent; i++) divisor *= 10
+    value = amount / divisor
+    if (value == int(value)) printf "$%.0f", value
+    else printf "$%.2f", value
+  }'
+}
+
+format_tokens() {
+  awk -v tokens="$1" 'BEGIN {
+    if (tokens >= 1000000000) printf "%.1fB", tokens / 1000000000
+    else if (tokens >= 1000000) printf "%.1fM", tokens / 1000000
+    else if (tokens >= 1000) printf "%.1fk", tokens / 1000
+    else printf "%.0f", tokens
+  }'
+}
+
+refresh_claude_usage() {
+  usage_cache="$1"
+  credentials=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || true)
+  access_token=$(printf '%s' "$credentials" | "$jq_bin" -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+  [ -n "$access_token" ] || return 0
+
+  curl_config=$(mktemp "$cache_dir/claude-curl.XXXXXX")
+  usage_response=$(mktemp "$cache_dir/claude-usage.XXXXXX")
+  chmod 600 "$curl_config" "$usage_response"
+
+  {
+    printf '%s\n' 'silent' 'show-error'
+    printf 'url = "%s"\n' 'https://api.anthropic.com/api/oauth/usage'
+    printf 'header = "Authorization: Bearer %s"\n' "$access_token"
+    printf '%s\n' 'header = "anthropic-beta: oauth-2025-04-20"' 'header = "Content-Type: application/json"'
+  } > "$curl_config"
+
+  http_code=$(curl --config "$curl_config" --output "$usage_response" --write-out '%{http_code}' 2>/dev/null || true)
+  rm -f "$curl_config"
+
+  if [ "$http_code" = "200" ] && "$jq_bin" -e 'type == "object"' "$usage_response" >/dev/null 2>&1; then
+    mv "$usage_response" "$usage_cache"
+  else
+    rm -f "$usage_response"
+  fi
+}
+
+swift_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+now=$(date +%s)
+
+claude_summary="waiting for next response"
+claude_detail="Claude publishes limits after it replies"
+claude_progress="0"
+claude_cache="$cache_dir/claude.json"
+
+if [ -s "$claude_cache" ] && "$jq_bin" -e '.rate_limits != null' "$claude_cache" >/dev/null 2>&1; then
+  claude_summary=""
+  claude_detail=""
+  claude_progress=""
+
+  for spec in 'five_hour:5h' 'seven_day:7d'; do
+    key=${spec%%:*}
+    label=${spec##*:}
+    used=$("$jq_bin" -r --arg key "$key" '.rate_limits[$key].used_percentage // empty' "$claude_cache")
+    reset=$("$jq_bin" -r --arg key "$key" '.rate_limits[$key].resets_at // empty' "$claude_cache")
+    if [ -n "$used" ] && [ -n "$reset" ] && [ "$reset" -gt "$now" ] 2>/dev/null; then
+      remaining=$(remaining_percent "$used")
+      fraction=$(remaining_fraction "$used")
+      reset_at=$(reset_text "$label" "$reset")
+      claude_summary="${claude_summary:+$claude_summary · }$label ${remaining}% left"
+      claude_detail="${claude_detail:+$claude_detail · }$label resets $reset_at"
+      claude_progress=$(min_fraction "$claude_progress" "$fraction")
+    fi
+  done
+
+  if [ -z "$claude_summary" ]; then
+    claude_summary="waiting for next response"
+    claude_detail="Cached Claude limits have reset"
+    claude_progress="0"
+  fi
+fi
+
+# Team accounts do not publish rolling limits to status-line JSON. Claude Code's
+# own /usage screen reads this authenticated endpoint, so use it as a fallback.
+claude_usage_cache="$cache_dir/claude-usage.json"
+usage_cache_mtime=0
+[ -f "$claude_usage_cache" ] && usage_cache_mtime=$(stat -f '%m' "$claude_usage_cache" 2>/dev/null || printf '0')
+if [ $((now - usage_cache_mtime)) -ge 300 ]; then
+  refresh_claude_usage "$claude_usage_cache"
+fi
+
+if [ "$claude_summary" = "waiting for next response" ] && [ -s "$claude_usage_cache" ]; then
+  spend_used_minor=$("$jq_bin" -r '.spend.used.amount_minor // empty' "$claude_usage_cache")
+  spend_used_exponent=$("$jq_bin" -r '.spend.used.exponent // empty' "$claude_usage_cache")
+  spend_limit_minor=$("$jq_bin" -r '.spend.limit.amount_minor // empty' "$claude_usage_cache")
+  spend_limit_exponent=$("$jq_bin" -r '.spend.limit.exponent // empty' "$claude_usage_cache")
+  spend_percent=$("$jq_bin" -r '.spend.percent // .extra_usage.utilization // empty' "$claude_usage_cache")
+
+  if [ -n "$spend_used_minor" ] && [ -n "$spend_used_exponent" ] && [ -n "$spend_limit_minor" ] && [ -n "$spend_limit_exponent" ]; then
+    spend_used=$(money_from_minor "$spend_used_minor" "$spend_used_exponent")
+    spend_limit=$(money_from_minor "$spend_limit_minor" "$spend_limit_exponent")
+    claude_summary="Extra $spend_used / $spend_limit${spend_percent:+ · $spend_percent% used}"
+    claude_detail=""
+  fi
+
+  credit_used=$("$jq_bin" -r '.cinder_cove.utilization // empty' "$claude_usage_cache")
+  credit_expiry=$("$jq_bin" -r '.cinder_cove.resets_at // empty' "$claude_usage_cache")
+  if [ -n "$credit_used" ]; then
+    credit_used_rounded=$(awk -v value="$credit_used" 'BEGIN { printf "%.0f", value }')
+    expiry_text=""
+    if [ -n "$credit_expiry" ]; then
+      expiry_day=${credit_expiry%%T*}
+      expiry_text=$(date -j -f '%Y-%m-%d' "$expiry_day" '+%b %d' 2>/dev/null || true)
+    fi
+    if [ "$credit_used_rounded" -ge 100 ] 2>/dev/null; then
+      credit_text="Team credit exhausted"
+    else
+      credit_text="Team credit ${credit_used_rounded}% used"
+    fi
+    [ -n "$expiry_text" ] && credit_text="$credit_text · expires $expiry_text"
+    claude_detail="$credit_text"
+  fi
+fi
+
+codex_summary="waiting for Codex activity"
+codex_detail="Codex publishes limits while it works"
+codex_progress="0"
+codex_snapshot=""
+
+while IFS= read -r session_file; do
+  [ -n "$session_file" ] || continue
+  candidate=$("$jq_bin" -c 'select(.type == "event_msg" and .payload.type == "token_count" and .payload.rate_limits != null) | .payload.rate_limits' "$session_file" 2>/dev/null | tail -1)
+  if [ -n "$candidate" ]; then
+    codex_snapshot="$candidate"
+    break
+  fi
+done <<EOF
+$(find "$HOME/.codex/sessions" -type f -name '*.jsonl' -mtime -8 -print0 2>/dev/null | xargs -0 stat -f '%m %N' 2>/dev/null | sort -rn | cut -d' ' -f2- | head -30)
+EOF
+
+if [ -n "$codex_snapshot" ]; then
+  codex_summary=""
+  codex_detail=""
+  codex_progress=""
+
+  for slot in primary secondary; do
+    used=$(printf '%s' "$codex_snapshot" | "$jq_bin" -r --arg slot "$slot" '.[$slot].used_percent // empty')
+    minutes=$(printf '%s' "$codex_snapshot" | "$jq_bin" -r --arg slot "$slot" '.[$slot].window_minutes // empty')
+    reset=$(printf '%s' "$codex_snapshot" | "$jq_bin" -r --arg slot "$slot" '.[$slot].resets_at // empty')
+    if [ -n "$used" ] && [ -n "$minutes" ] && [ -n "$reset" ] && [ "$reset" -gt "$now" ] 2>/dev/null; then
+      label=$(window_label "$minutes")
+      remaining=$(remaining_percent "$used")
+      fraction=$(remaining_fraction "$used")
+      reset_at=$(reset_text "$label" "$reset")
+      codex_summary="${codex_summary:+$codex_summary · }$label ${remaining}% left"
+      codex_detail="${codex_detail:+$codex_detail · }$label resets $reset_at"
+      codex_progress=$(min_fraction "$codex_progress" "$fraction")
+    fi
+  done
+
+  if [ -z "$codex_summary" ]; then
+    codex_summary="waiting for Codex activity"
+    codex_detail="Cached Codex limits have reset"
+    codex_progress="0"
+  fi
+fi
+
+agent_entries=""
+session_agent_entries=""
+session_model_entries=""
+session_context_entries=""
+session_usage_entries=""
+session_agent_cases=""
+session_model_cases=""
+session_context_cases=""
+session_usage_cases=""
+session_branch_cases=""
+workspace_running_cases=""
+workspace_waiting_cases=""
+session_metrics_dir="$cache_dir/session-metrics"
+mkdir -p "$session_metrics_dir"
+
+# `cmux sessions` reads cmux's saved hook records and does not require socket
+# access, so it works from launchd. Build one cached metrics record per surface;
+# the custom sidebar itself chooses the live focused surface.
+all_sessions=$("$cmux_bin" sessions --all --json 2>/dev/null || true)
+while IFS= read -r encoded_record; do
+  [ -n "$encoded_record" ] || continue
+  record=$(printf '%s' "$encoded_record" | base64 -D 2>/dev/null || true)
+  [ -n "$record" ] || continue
+
+  surface_id=$(printf '%s' "$record" | "$jq_bin" -r '.surface_id // empty')
+  session_agent=$(printf '%s' "$record" | "$jq_bin" -r '.agent // empty')
+  transcript=$(printf '%s' "$record" | "$jq_bin" -r '.codex_transcript_path // .transcript_path // empty')
+  [ -n "$surface_id" ] && [ -f "$transcript" ] || continue
+
+  # cmux's watchGitStatus does not populate branch for named (non-path) workspaces,
+  # so derive it from the surface's live cwd. Computed every run (branch/dirty
+  # change independently of the transcript, so this is intentionally uncached).
+  session_cwd=$(printf '%s' "$record" | "$jq_bin" -r '.cwd // .launch_working_directory // empty')
+  session_branch=""
+  if [ -n "$session_cwd" ] && [ -d "$session_cwd" ]; then
+    branch_name=$(git -C "$session_cwd" symbolic-ref --short -q HEAD 2>/dev/null || true)
+    if [ -n "$branch_name" ]; then
+      if [ -n "$(git -C "$session_cwd" status --porcelain --untracked-files=no 2>/dev/null | head -1)" ]; then
+        session_branch="$branch_name • modified"
+      else
+        session_branch="$branch_name"
+      fi
+    fi
+  fi
+
+  metrics_cache="$session_metrics_dir/$surface_id.json"
+  transcript_mtime=$(stat -f '%m' "$transcript" 2>/dev/null || printf '0')
+  source_mtime="$transcript_mtime"
+  claude_surface_cache="$cache_dir/claude-sessions/$surface_id.json"
+  if [ -f "$claude_surface_cache" ]; then
+    claude_cache_mtime=$(stat -f '%m' "$claude_surface_cache" 2>/dev/null || printf '0')
+    [ "$claude_cache_mtime" -gt "$source_mtime" ] 2>/dev/null && source_mtime="$claude_cache_mtime"
+  fi
+  metrics_mtime=0
+  [ -f "$metrics_cache" ] && metrics_mtime=$(stat -f '%m' "$metrics_cache" 2>/dev/null || printf '0')
+
+  if [ "$source_mtime" -gt "$metrics_mtime" ] 2>/dev/null || [ ! -s "$metrics_cache" ]; then
+    session_model=""
+    session_effort=""
+    session_context=""
+    session_usage=""
+
+    if [ "$session_agent" = "codex" ]; then
+      turn_context=$("$jq_bin" -c 'select(.type == "turn_context") | .payload | {model, effort}' "$transcript" 2>/dev/null | tail -1)
+      token_info=$("$jq_bin" -c 'select(.type == "event_msg" and .payload.type == "token_count" and .payload.info != null) | .payload.info' "$transcript" 2>/dev/null | tail -1)
+      session_model=$(printf '%s' "$turn_context" | "$jq_bin" -r '.model // empty')
+      session_effort=$(printf '%s' "$turn_context" | "$jq_bin" -r '.effort // empty')
+      context_limit=$(printf '%s' "$token_info" | "$jq_bin" -r '.model_context_window // empty')
+      context_used=$(printf '%s' "$token_info" | "$jq_bin" -r '.last_token_usage.total_tokens // empty')
+      session_tokens=$(printf '%s' "$token_info" | "$jq_bin" -r '.total_token_usage.total_tokens // empty')
+      if [ -n "$context_limit" ] && [ -n "$context_used" ]; then
+        context_pct=$(awk -v used="$context_used" -v limit="$context_limit" 'BEGIN { if (limit > 0) printf "%.0f", used * 100 / limit; else print "0" }')
+        session_context="Context $(format_tokens "$context_used") / $(format_tokens "$context_limit") · ${context_pct}%"
+      fi
+      [ -n "$session_tokens" ] && session_usage="Session $(format_tokens "$session_tokens") tokens"
+    elif [ "$session_agent" = "claude" ]; then
+      last_assistant=$("$jq_bin" -c 'select(.type == "assistant" and .message.model != null) | {
+        model: .message.model,
+        effort: .effort,
+        context_used: ((.message.usage.input_tokens // 0) + (.message.usage.cache_creation_input_tokens // 0) + (.message.usage.cache_read_input_tokens // 0))
+      }' "$transcript" 2>/dev/null | tail -1)
+      session_model=$(printf '%s' "$last_assistant" | "$jq_bin" -r '.model // empty')
+      session_effort=$(printf '%s' "$last_assistant" | "$jq_bin" -r '.effort // empty')
+      context_used=$(printf '%s' "$last_assistant" | "$jq_bin" -r '.context_used // empty')
+
+      if [ -s "$claude_surface_cache" ]; then
+        cached_model=$("$jq_bin" -r '.model.display_name // .model.id // empty' "$claude_surface_cache")
+        cached_effort=$("$jq_bin" -r '.effort.level // empty' "$claude_surface_cache")
+        context_limit=$("$jq_bin" -r '.context_window.context_window_size // empty' "$claude_surface_cache")
+        cached_context_used=$("$jq_bin" -r '.context_window.total_input_tokens // empty' "$claude_surface_cache")
+        context_pct=$("$jq_bin" -r '.context_window.used_percentage // empty' "$claude_surface_cache")
+        session_cost=$("$jq_bin" -r '.cost.total_cost_usd // empty' "$claude_surface_cache")
+        [ -n "$cached_model" ] && session_model="$cached_model"
+        [ -n "$cached_effort" ] && session_effort="$cached_effort"
+        [ -n "$cached_context_used" ] && context_used="$cached_context_used"
+        if [ -n "$context_limit" ] && [ -n "$context_used" ]; then
+          session_context="Context $(format_tokens "$context_used") / $(format_tokens "$context_limit")"
+          [ -n "$context_pct" ] && session_context="$session_context · $(awk -v value="$context_pct" 'BEGIN { printf "%.0f%%", value }')"
+        fi
+        [ -n "$session_cost" ] && session_usage=$(awk -v cost="$session_cost" 'BEGIN { printf "Session $%.2f", cost }')
+      elif [ -n "$context_used" ]; then
+        session_context="Context $(format_tokens "$context_used") used · limit after next response"
+      fi
+    fi
+
+    metrics_tmp=$(mktemp "$session_metrics_dir/metrics.XXXXXX")
+    "$jq_bin" -n \
+      --arg agent "$session_agent" \
+      --arg model "$session_model" \
+      --arg effort "$session_effort" \
+      --arg context "$session_context" \
+      --arg usage "$session_usage" \
+      '{agent: $agent, model: $model, effort: $effort, context: $context, usage: $usage}' > "$metrics_tmp"
+    mv "$metrics_tmp" "$metrics_cache"
+  fi
+
+  metrics=$("$jq_bin" -c . "$metrics_cache" 2>/dev/null || true)
+  [ -n "$metrics" ] || continue
+  session_model=$(printf '%s' "$metrics" | "$jq_bin" -r '.model // empty')
+  session_effort=$(printf '%s' "$metrics" | "$jq_bin" -r '.effort // empty')
+  session_context=$(printf '%s' "$metrics" | "$jq_bin" -r '.context // empty')
+  session_usage=$(printf '%s' "$metrics" | "$jq_bin" -r '.usage // empty')
+  session_agent_label=""
+  [ "$session_agent" = "codex" ] && session_agent_label="Codex session"
+  [ "$session_agent" = "claude" ] && session_agent_label="Claude session"
+  model_summary="$session_model"
+  [ -n "$session_effort" ] && model_summary="${model_summary:+$model_summary · }$session_effort effort"
+
+  session_agent_entries="$session_agent_entries  \"$(swift_escape "$surface_id")\": \"$(swift_escape "$session_agent_label")\",\n"
+  session_model_entries="$session_model_entries  \"$(swift_escape "$surface_id")\": \"$(swift_escape "$model_summary")\",\n"
+  session_context_entries="$session_context_entries  \"$(swift_escape "$surface_id")\": \"$(swift_escape "$session_context")\",\n"
+  session_usage_entries="$session_usage_entries  \"$(swift_escape "$surface_id")\": \"$(swift_escape "$session_usage")\",\n"
+  session_agent_cases="$session_agent_cases  if surfaceId == \"$(swift_escape "$surface_id")\" { return \"$(swift_escape "$session_agent_label")\" }\n"
+  session_model_cases="$session_model_cases  if surfaceId == \"$(swift_escape "$surface_id")\" { return \"$(swift_escape "$model_summary")\" }\n"
+  session_context_cases="$session_context_cases  if surfaceId == \"$(swift_escape "$surface_id")\" { return \"$(swift_escape "$session_context")\" }\n"
+  session_usage_cases="$session_usage_cases  if surfaceId == \"$(swift_escape "$surface_id")\" { return \"$(swift_escape "$session_usage")\" }\n"
+  session_branch_cases="$session_branch_cases  if surfaceId == \"$(swift_escape "$surface_id")\" { return \"$(swift_escape "$session_branch")\" }\n"
+done <<EOF
+$(printf '%s' "$all_sessions" | "$jq_bin" -r '
+  [.sessions[] | select(.surface_id != null and .surface_id != "")]
+  | group_by(.surface_id)
+  | map(max_by(.updated_at_unix // 0))
+  | sort_by(.updated_at_unix // 0) | reverse | .[:40][] | @base64
+' 2>/dev/null)
+EOF
+
+# Keep workspace activity deliberately narrow: running means the agent is
+# actively producing a turn; needsInput means it is explicitly waiting on the
+# human. Idle sessions remain available but do not make the workspace look busy.
+while IFS=$'\t' read -r workspace_id running_count waiting_count; do
+  [ -n "$workspace_id" ] || continue
+  workspace_running_cases="$workspace_running_cases  if workspaceId == \"$(swift_escape "$workspace_id")\" { return $running_count }\n"
+  workspace_waiting_cases="$workspace_waiting_cases  if workspaceId == \"$(swift_escape "$workspace_id")\" { return $waiting_count }\n"
+done <<EOF
+$(printf '%s' "$all_sessions" | "$jq_bin" -r '
+  [.sessions[] | select(
+    .surface_id != null and .surface_id != ""
+    and .workspace_id != null and .workspace_id != ""
+    and (.agent == "codex" or .agent == "claude")
+  )]
+  | group_by(.surface_id)
+  | map(max_by(.updated_at_unix // 0))
+  | group_by(.workspace_id)
+  | .[]
+  | [
+      .[0].workspace_id,
+      (map(select(.agent_lifecycle == "running")) | length),
+      (map(select(.agent_lifecycle == "needsInput")) | length)
+    ]
+  | @tsv
+' 2>/dev/null)
+EOF
+
+# Last submitted prompt per surface, recorded by scripts/agent_prompt_pin.py.
+prompt_store="$HOME/.config/cmux/agent-prompts.json"
+prompt_text_cases=""
+prompt_at_cases=""
+if [ -f "$prompt_store" ]; then
+  prompt_text_cases=$("$jq_bin" -r '
+    to_entries[]
+    | "  if surfaceId == " + (.key | @json) + " { return " + ((.value.prompt // "") | @json) + " }"
+  ' "$prompt_store" 2>/dev/null)
+  prompt_at_cases=$("$jq_bin" -r '
+    to_entries[]
+    | "  if surfaceId == " + (.key | @json) + " { return " + ((.value.at // 0) | tostring) + " }"
+  ' "$prompt_store" 2>/dev/null)
+fi
+
+candidate_file=$(mktemp "$cache_dir/productivity.swift.XXXXXX")
+
+cat > "$candidate_file" <<EOF
+let agentStates = [
+$(printf '%b' "$agent_entries")  "_": ""
+]
+
+func sessionAgent(_ surfaceId) -> String {
+$(printf '%b' "$session_agent_cases")  return ""
+}
+
+func sessionModel(_ surfaceId) -> String {
+$(printf '%b' "$session_model_cases")  return ""
+}
+
+func sessionContext(_ surfaceId) -> String {
+$(printf '%b' "$session_context_cases")  return ""
+}
+
+func sessionUsageText(_ surfaceId) -> String {
+$(printf '%b' "$session_usage_cases")  return ""
+}
+
+func focusedBranch(_ surfaceId) -> String {
+$(printf '%b' "$session_branch_cases")  return ""
+}
+
+func pinnedPrompt(_ surfaceId) -> String {
+$prompt_text_cases
+  return ""
+}
+
+func pinnedAt(_ surfaceId) -> Int {
+$prompt_at_cases
+  return 0
+}
+
+func runningAgentCount(_ workspaceId) -> Int {
+$(printf '%b' "$workspace_running_cases")  return 0
+}
+
+func waitingAgentCount(_ workspaceId) -> Int {
+$(printf '%b' "$workspace_waiting_cases")  return 0
+}
+
+func hasBranch(_ w) -> Bool {
+  return w.branch != nil && w.branch != ""
+}
+
+func directoryName(_ path) -> String {
+  let parts = path.split(separator: "/")
+  if parts.count > 0 {
+    return parts[parts.count - 1]
+  }
+  return path
+}
+
+func workspaceRow(_ w) -> some View {
+  HStack(alignment: .top, spacing: 8) {
+      Capsule()
+        .frame(width: 3, height: 34)
+        .foregroundColor(w.selected ? "#C4A7E7" : "#6E6A86")
+        .opacity(w.selected ? 1.0 : 0.45)
+
+      VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 4) {
+          Text(w.title)
+            .font(.system(size: 12))
+            .fontWeight(w.selected ? .semibold : .regular)
+            .foregroundColor(.primary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+          Spacer()
+          if runningAgentCount(w.id) > 0 {
+            HStack(spacing: 3) {
+              ZStack {
+                Circle()
+                  .stroke("#9CCFD8", lineWidth: 1)
+                  .opacity(0.25)
+                Circle()
+                  .trim(from: 0.12, to: 0.72)
+                  .stroke("#9CCFD8", lineWidth: 1.5)
+                  .rotationEffect(.degrees(Double(clock.second * 30)))
+              }
+              .frame(width: 9, height: 9)
+              Text("\(runningAgentCount(w.id))")
+                .font(.system(size: 9, design: .monospaced))
+                .bold()
+                .foregroundColor("#9CCFD8")
+            }
+            .padding(3)
+            .fixedSize()
+            .background { Capsule().foregroundColor("#9CCFD8").opacity(0.12) }
+            .help("\(runningAgentCount(w.id)) running agent(s)")
+          }
+          if waitingAgentCount(w.id) > 0 {
+            HStack(spacing: 3) {
+              Image(systemName: "pause.fill")
+                .font(.system(size: 7))
+              Text("\(waitingAgentCount(w.id))")
+                .font(.system(size: 9, design: .monospaced))
+                .bold()
+            }
+            .foregroundColor("#F6C177")
+            .padding(3)
+            .fixedSize()
+            .background { Capsule().foregroundColor("#F6C177").opacity(0.12) }
+            .help("\(waitingAgentCount(w.id)) agent(s) waiting for input")
+          }
+          if w.unread > 0 {
+            Text("\(w.unread)")
+              .font(.system(size: 9, design: .monospaced))
+              .bold()
+              .foregroundColor("#26233A")
+              .padding(4)
+              .background { Capsule().foregroundColor("#F6C177") }
+          }
+        }
+
+        HStack(spacing: 5) {
+          if hasBranch(w) {
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 8)).foregroundColor("#9CCFD8")
+            Text(w.dirty == true ? "\(w.branch) •" : w.branch)
+              .font(.system(size: 9, design: .monospaced))
+              .foregroundColor("#C9C5DA")
+              .lineLimit(1)
+              .truncationMode(.middle)
+          } else {
+            Text("\(w.tabCount) tabs")
+              .font(.system(size: 9, design: .monospaced))
+              .foregroundColor(.secondary)
+          }
+        }
+
+        if agentStates[w.id] != nil && agentStates[w.id] != "" {
+          Text(agentStates[w.id])
+            .font(.system(size: 9))
+            .foregroundColor(w.selected ? "#EBBCBA" : .secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+        }
+      }
+      Spacer()
+  }
+  .padding(6)
+  .frame(maxWidth: .infinity, alignment: .leading)
+  .background {
+    RoundedRectangle(cornerRadius: 8)
+      .foregroundColor(w.selected ? "#C4A7E7" : "#000000")
+      .opacity(w.selected ? 0.14 : 0.001)
+  }
+  .onTapGesture { cmux("workspace.select", workspace_id: w.id) }
+}
+
+VStack(alignment: .leading, spacing: 7) {
+  HStack {
+    Text("Workspaces").font(.system(size: 13)).fontWeight(.semibold).foregroundColor(.primary)
+    Spacer()
+    Text(clock.time).font(.system(size: 9, design: .monospaced)).foregroundColor(.secondary)
+  }
+  .padding(6)
+
+  Divider()
+
+  Reorderable(workspaces.prefix(24), move: "workspace.reorder") { w in
+    workspaceRow(w)
+  }
+
+  Spacer()
+  Divider()
+
+  ForEach(workspaces.filter { \$0.selected }.prefix(1)) { selected in
+    VStack(alignment: .leading, spacing: 3) {
+      HStack(spacing: 6) {
+        Image(systemName: "terminal.fill").font(.system(size: 9)).foregroundColor("#9CCFD8")
+        Text("Focused terminal").font(.system(size: 9)).fontWeight(.semibold).foregroundColor(.secondary)
+        Spacer()
+      }
+
+      ForEach(selected.tabs.filter { \$0.focused }.prefix(1)) { tab in
+        Text(tab.title).font(.system(size: 10)).fontWeight(.semibold).foregroundColor(.primary).lineLimit(1)
+        if tab.directory != nil && tab.directory != "" {
+          Text(directoryName(tab.directory)).font(.system(size: 9, design: .monospaced)).foregroundColor(.primary).lineLimit(1)
+        }
+        if focusedBranch(tab.id) != "" {
+          HStack(spacing: 5) {
+            Image(systemName: "arrow.triangle.branch").font(.system(size: 8)).foregroundColor("#9CCFD8")
+            Text(focusedBranch(tab.id))
+              .font(.system(size: 9, design: .monospaced)).foregroundColor("#C4A7E7").lineLimit(1)
+          }
+        }
+      }
+
+      Text(selected.directory).font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary).lineLimit(1).truncationMode(.middle)
+
+      ForEach(selected.tabs.filter { \$0.focused }.prefix(1)) { focusedTab in
+        if sessionAgent(focusedTab.id) != "" {
+          Divider()
+          HStack(spacing: 5) {
+            Image(systemName: "gauge.with.dots.needle.33percent").font(.system(size: 8)).foregroundColor("#F6C177")
+            Text(sessionAgent(focusedTab.id)).font(.system(size: 9)).fontWeight(.semibold).foregroundColor(.secondary)
+          }
+          if sessionModel(focusedTab.id) != "" {
+            Text(sessionModel(focusedTab.id))
+              .font(.system(size: 9, design: .monospaced)).foregroundColor(.primary).lineLimit(1)
+          }
+          if sessionContext(focusedTab.id) != "" {
+            Text(sessionContext(focusedTab.id)).font(.system(size: 8, design: .monospaced)).foregroundColor("#C4A7E7").lineLimit(1)
+          }
+          if sessionUsageText(focusedTab.id) != "" {
+            Text(sessionUsageText(focusedTab.id)).font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary).lineLimit(1)
+          }
+        }
+      }
+
+      ForEach(selected.tabs.filter { \$0.focused }.prefix(1)) { promptTab in
+        if pinnedPrompt(promptTab.id) != "" {
+          Divider()
+          HStack(spacing: 5) {
+            Image(systemName: "text.bubble").font(.system(size: 8)).foregroundColor("#EBBCBA")
+            if (clock.epoch - pinnedAt(promptTab.id)) < 3600 {
+              Text("Son prompt · \((clock.epoch - pinnedAt(promptTab.id)) / 60) dk önce")
+                .font(.system(size: 9)).fontWeight(.semibold).foregroundColor(.secondary)
+            } else {
+              Text("Son prompt · \((clock.epoch - pinnedAt(promptTab.id)) / 3600) sa önce")
+                .font(.system(size: 9)).fontWeight(.semibold).foregroundColor(.secondary)
+            }
+            Spacer()
+          }
+          Text(pinnedPrompt(promptTab.id))
+            .font(.system(size: 11))
+            .foregroundColor(.primary)
+            .multilineTextAlignment(.leading)
+            .lineLimit(8)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+      }
+    }
+    .padding(7)
+    .background { RoundedRectangle(cornerRadius: 8).foregroundColor("#9CCFD8").opacity(0.09) }
+  }
+
+  VStack(alignment: .leading, spacing: 8) {
+    HStack {
+      Text("Usage").font(.system(size: 9)).fontWeight(.semibold).textCase(.uppercase).foregroundColor(.secondary)
+      Spacer()
+    }
+
+    VStack(alignment: .leading, spacing: 3) {
+      HStack(spacing: 6) {
+        Image(systemName: "sparkles").font(.system(size: 10)).foregroundColor("#C4A7E7")
+        Text("Claude").font(.system(size: 10)).fontWeight(.semibold).foregroundColor(.primary)
+      }
+      Text("$(swift_escape "$claude_summary")").font(.system(size: 9, design: .monospaced)).foregroundColor(.primary).lineLimit(1)
+      Text("$(swift_escape "$claude_detail")").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary).lineLimit(1)
+    }
+
+    VStack(alignment: .leading, spacing: 3) {
+      HStack(spacing: 6) {
+        Image(systemName: "bolt.fill").font(.system(size: 10)).foregroundColor("#9CCFD8")
+        Text("Codex").font(.system(size: 10)).fontWeight(.semibold).foregroundColor(.primary)
+      }
+      Text("$(swift_escape "$codex_summary")").font(.system(size: 9, design: .monospaced)).foregroundColor(.primary).lineLimit(1)
+      Text("$(swift_escape "$codex_detail")").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary).lineLimit(1)
+    }
+  }
+  .padding(8)
+  .background { RoundedRectangle(cornerRadius: 9).foregroundColor("#6E6A86").opacity(0.13) }
+  .padding(4)
+}
+EOF
+
+if [ ! -f "$sidebar_file" ] || ! cmp -s "$candidate_file" "$sidebar_file"; then
+  mv "$candidate_file" "$sidebar_file"
+else
+  rm -f "$candidate_file"
+fi
+
+exit 0

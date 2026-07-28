@@ -1,0 +1,353 @@
+{
+  "$schema": "https://raw.githubusercontent.com/manaflow-ai/cmux/main/web/data/cmux.schema.json",
+  "actions": {
+    "adcelerate-cli": {
+      "icon": {
+        "name": "terminal",
+        "type": "symbol"
+      },
+      "newWorkspaceMenu": true,
+      "restart": "new",
+      "subtitle": "Claude with Pro and standard CLI terminals",
+      "title": "Adcelerate CLI",
+      "type": "workspace",
+      "workspace": {
+        "cwd": ".",
+        "layout": {
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "command": "claude --permission-mode auto",
+                    "focus": true,
+                    "name": "Claude",
+                    "type": "terminal"
+                  }
+                ]
+              }
+            },
+            {
+              "children": [
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Adcelerate Pro",
+                        "type": "terminal"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Adcelerate CLI",
+                        "type": "terminal"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "direction": "vertical",
+              "split": 0.5
+            }
+          ],
+          "direction": "horizontal",
+          "split": 0.5
+        },
+        "name": "Adcelerate CLI"
+      }
+    },
+    "cmux.newBrowser": {
+      "builtin": "cmux.newBrowser",
+      "palette": false,
+      "title": "New Browser Surface",
+      "type": "builtin"
+    },
+    "coding-grid": {
+      "icon": {
+        "name": "rectangle.split.2x2",
+        "type": "symbol"
+      },
+      "newWorkspaceMenu": true,
+      "restart": "new",
+      "shortcut": "ctrl+cmd+g",
+      "subtitle": "Claude, Codex, live Hunk, and a shell",
+      "title": "Coding Grid",
+      "type": "workspace",
+      "workspace": {
+        "cwd": ".",
+        "layout": {
+          "children": [
+            {
+              "children": [
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "command": "claude --permission-mode auto",
+                        "focus": true,
+                        "name": "Claude",
+                        "type": "terminal"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "command": "exec /bin/zsh -lic hunkr",
+                        "name": "Live Hunk",
+                        "type": "terminal"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "direction": "horizontal",
+              "split": 0.5
+            },
+            {
+              "children": [
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "command": "codex",
+                        "name": "Codex",
+                        "type": "terminal"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Shell",
+                        "type": "terminal"
+                      },
+                      {
+                        "name": "Browser",
+                        "type": "browser",
+                        "url": "about:blank"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "direction": "horizontal",
+              "split": 0.5
+            }
+          ],
+          "direction": "vertical",
+          "split": 0.5
+        },
+        "name": "Coding Grid"
+      }
+    },
+    "link-hub": {
+      "icon": {
+        "name": "globe",
+        "type": "symbol"
+      },
+      "newWorkspaceMenu": true,
+      "restart": "new",
+      "subtitle": "Work dashboards, reviews, calendar, and personal music",
+      "title": "Link Hub",
+      "type": "workspace",
+      "workspace": {
+        "cwd": ".",
+        "layout": {
+          "children": [
+            {
+              "children": [
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "focus": true,
+                        "name": "K8s Server Logs",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "K8s Sync Logs",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "K8s Worker Logs",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "K8s Workloads",
+                        "type": "browser",
+                        "url": "about:blank"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Calendar",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "YouTube Music",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "Notion",
+                        "type": "browser",
+                        "url": "about:blank"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "direction": "horizontal",
+              "split": 0.5
+            },
+            {
+              "children": [
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Panel MRs",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "Server MRs",
+                        "type": "browser",
+                        "url": "about:blank"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "pane": {
+                    "surfaces": [
+                      {
+                        "name": "Adcelerate Prod",
+                        "type": "browser",
+                        "url": "about:blank"
+                      },
+                      {
+                        "name": "Adcelerate Staging",
+                        "type": "browser",
+                        "url": "about:blank"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "direction": "horizontal",
+              "split": 0.5
+            }
+          ],
+          "direction": "vertical",
+          "split": 0.5
+        },
+        "name": "Link Hub"
+      }
+    },
+    "product-delivery": {
+      "icon": {
+        "name": "shippingbox",
+        "type": "symbol"
+      },
+      "newWorkspaceMenu": true,
+      "restart": "new",
+      "shortcut": "ctrl+cmd+d",
+      "subtitle": "Autonomous delivery with risk gates",
+      "title": "Product Delivery",
+      "type": "workspace",
+      "workspace": {
+        "cwd": ".",
+        "layout": {
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "command": "cmux-deliver --from-action",
+                    "focus": true,
+                    "name": "Product Manager",
+                    "type": "terminal"
+                  },
+                  {
+                    "name": "Dev Lead",
+                    "type": "terminal"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "command": "exec /bin/zsh -lic hunk",
+                    "name": "Hunk",
+                    "type": "terminal"
+                  },
+                  {
+                    "name": "Localhost / UAT",
+                    "type": "browser",
+                    "url": "about:blank"
+                  }
+                ]
+              }
+            }
+          ],
+          "direction": "vertical",
+          "split": 0.71999999999999997
+        },
+        "name": "Product Delivery"
+      }
+    }
+  },
+  "activePaneBorderColor": "#c4a7e7",
+  "app": {
+    "openMarkdownInCmuxViewer": true,
+    "openSupportedFilesInCmux": true
+  },
+  "automation": {
+    "socketControlMode": "cmuxOnly"
+  },
+  "browser": {
+    "discardHiddenWebViews": false
+  },
+  "fileExplorer": {
+    "doubleClickAction": "preview"
+  },
+  "notifications": {
+    "customSoundFilePath": "__HOME__/Library/Sounds/cmux-purr-soft-tail-louder.wav",
+    "sound": "custom_file"
+  },
+  "paneBorderColor": "#817c9c",
+  "schemaVersion": 1,
+  "shortcuts": {
+    "bindings": {
+      "cmux.newBrowser": "cmd+t",
+      "newSurface": "cmd+t"
+    },
+    "when": {
+      "cmux.newBrowser": "browserFocus",
+      "newSurface": "!browserFocus"
+    }
+  },
+  "sidebarAppearance": {
+    "matchTerminalBackground": true
+  }
+}
