@@ -1,6 +1,7 @@
 # cmux setup
 
 Portable cmux configuration for a macOS agent-focused terminal environment.
+Tested with cmux 0.64.20.
 
 This repository contains:
 
@@ -28,6 +29,8 @@ Requirements:
 From a cloned checkout:
 
 ```sh
+git clone https://github.com/ismaileneskirli/cmux-setup.git
+cd cmux-setup
 ./scripts/install.sh
 ```
 
@@ -55,3 +58,6 @@ machine.
 After changing cmux settings, back up the local files and copy the desired
 configuration into this repository. Do not commit session files, API tokens,
 OAuth credentials, private URLs, or absolute home-directory paths.
+
+See [SECURITY.md](SECURITY.md) for the dashboard's local credential and
+session-data behavior.
