@@ -8,7 +8,7 @@ This repository contains:
 - the cmux workspace actions and layouts;
 - Ghostty appearance settings used by cmux;
 - Claude/Codex cmux hooks;
-- the dynamic productivity sidebar dashboard;
+- the dynamic productivity sidebar dashboard, including a Notes card;
 - the small custom notification sounds used by the setup;
 - a launchd template and an installation script.
 
@@ -52,6 +52,14 @@ The setup currently defines:
 Workspace actions use commands such as `claude`, `codex`, `hunk`, and
 `cmux-deliver`. Install those tools separately or edit the commands for your
 machine.
+
+## Notes card
+
+The sidebar shows a Notes card fed by `~/.config/cmux/notes.md` (one note per
+line, blank lines ignored, first 12 lines shown). The dashboard creates the file
+with a starter line if it is missing and re-reads it every 10 seconds. cmux
+sidebars cannot edit text inline, so tap the card header to open the file in
+your default editor.
 
 ## Updating the setup
 

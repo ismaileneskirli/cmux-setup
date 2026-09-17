@@ -369,6 +369,18 @@ $(printf '%s' "$all_sessions" | "$jq_bin" -r '
 ' 2>/dev/null)
 EOF
 
+# `cmux sessions` is a historical hook-record store: it keeps the last record of
+# every surface that ever ran an agent, including closed tabs and closed
+# workspaces, and their lifecycle stays frozen at whatever it was when the tab
+# died. Counting those inflates the badges (a 6-tab workspace showed 9). Restrict
+# the counts to surfaces that are still open, read from cmux's session state file
+# so this keeps working from launchd without socket access.
+live_surfaces_file="$cache_dir/live-surfaces.json"
+"$jq_bin" -c '[.windows[].tabManager.workspaces[].panels[].id] | unique' \
+  "$HOME/Library/Application Support/cmux/session-com.cmuxterm.app.json" \
+  > "$live_surfaces_file" 2>/dev/null || printf '[]' > "$live_surfaces_file"
+[ -s "$live_surfaces_file" ] || printf '[]' > "$live_surfaces_file"
+
 # Keep workspace activity deliberately narrow: running means the agent is
 # actively producing a turn; needsInput means it is explicitly waiting on the
 # human. Idle sessions remain available but do not make the workspace look busy.
@@ -377,11 +389,13 @@ while IFS=$'\t' read -r workspace_id running_count waiting_count; do
   workspace_running_cases="$workspace_running_cases  if workspaceId == \"$(swift_escape "$workspace_id")\" { return $running_count }\n"
   workspace_waiting_cases="$workspace_waiting_cases  if workspaceId == \"$(swift_escape "$workspace_id")\" { return $waiting_count }\n"
 done <<EOF
-$(printf '%s' "$all_sessions" | "$jq_bin" -r '
-  [.sessions[] | select(
+$(printf '%s' "$all_sessions" | "$jq_bin" -r --slurpfile live "$live_surfaces_file" '
+  ($live[0] // [] | map({key: ., value: true}) | from_entries) as $open
+  | [.sessions[] | select(
     .surface_id != null and .surface_id != ""
     and .workspace_id != null and .workspace_id != ""
     and (.agent == "codex" or .agent == "claude")
+    and $open[.surface_id] == true
   )]
   | group_by(.surface_id)
   | map(max_by(.updated_at_unix // 0))
@@ -410,6 +424,34 @@ if [ -f "$prompt_store" ]; then
     | "  if surfaceId == " + (.key | @json) + " { return " + ((.value.at // 0) | tostring) + " }"
   ' "$prompt_store" 2>/dev/null)
 fi
+
+# Notes card: plain-text scratchpad rendered from ~/.config/cmux/notes.md.
+# The sidebar DSL has no editable text fields, so edit the file directly;
+# tapping the card header opens it. Blank lines are dropped, long lists trimmed.
+notes_file="$HOME/.config/cmux/notes.md"
+notes_max_lines=12
+if [ ! -f "$notes_file" ]; then
+  printf '%s\n' '- Edit this file to change the Notes card' > "$notes_file"
+fi
+notes_lines=""
+notes_total=0
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  notes_total=$((notes_total + 1))
+  [ "$notes_total" -le "$notes_max_lines" ] || continue
+  notes_lines="$notes_lines      Text(\"$(swift_escape "$line")\").font(.system(size: 10)).foregroundColor(.primary).lineLimit(2).truncationMode(.tail).frame(maxWidth: .infinity, alignment: .leading)
+"
+done < "$notes_file"
+if [ "$notes_total" -eq 0 ]; then
+  notes_lines="      Text(\"Empty · add lines to notes.md\").font(.system(size: 9)).foregroundColor(.secondary)
+"
+fi
+notes_more=""
+if [ "$notes_total" -gt "$notes_max_lines" ]; then
+  notes_more="      Text(\"+$((notes_total - notes_max_lines)) more\").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
+"
+fi
+notes_url="file://$(swift_escape "$notes_file")"
 
 candidate_file=$(mktemp "$cache_dir/productivity.swift.XXXXXX")
 
@@ -653,6 +695,24 @@ VStack(alignment: .leading, spacing: 7) {
     .padding(7)
     .background { RoundedRectangle(cornerRadius: 8).foregroundColor("#9CCFD8").opacity(0.09) }
   }
+
+  VStack(alignment: .leading, spacing: 5) {
+    HStack(spacing: 5) {
+      Image(systemName: "note.text").font(.system(size: 9)).foregroundColor("#F6C177")
+      Text("Notes").font(.system(size: 9)).fontWeight(.semibold).textCase(.uppercase).foregroundColor(.secondary)
+      Spacer()
+      Image(systemName: "square.and.pencil").font(.system(size: 9)).foregroundColor(.secondary)
+    }
+    .onTapGesture { openURL("$notes_url") }
+    .help("Open notes.md")
+
+    VStack(alignment: .leading, spacing: 3) {
+$(printf '%s' "$notes_lines$notes_more")
+    }
+  }
+  .padding(8)
+  .background { RoundedRectangle(cornerRadius: 9).foregroundColor("#F6C177").opacity(0.10) }
+  .padding(4)
 
   VStack(alignment: .leading, spacing: 8) {
     HStack {
