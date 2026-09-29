@@ -74,7 +74,7 @@
       "newWorkspaceMenu": true,
       "restart": "new",
       "shortcut": "ctrl+cmd+g",
-      "subtitle": "Claude, Codex, live Hunk, and a shell",
+      "subtitle": "Claude, Codex, a shell, and a browser",
       "title": "Coding Grid",
       "type": "workspace",
       "workspace": {
@@ -82,33 +82,16 @@
         "layout": {
           "children": [
             {
-              "children": [
-                {
-                  "pane": {
-                    "surfaces": [
-                      {
-                        "command": "claude --permission-mode auto",
-                        "focus": true,
-                        "name": "Claude",
-                        "type": "terminal"
-                      }
-                    ]
+              "pane": {
+                "surfaces": [
+                  {
+                    "command": "claude --permission-mode auto",
+                    "focus": true,
+                    "name": "Claude",
+                    "type": "terminal"
                   }
-                },
-                {
-                  "pane": {
-                    "surfaces": [
-                      {
-                        "command": "exec /bin/zsh -lic hunkr",
-                        "name": "Live Hunk",
-                        "type": "terminal"
-                      }
-                    ]
-                  }
-                }
-              ],
-              "direction": "horizontal",
-              "split": 0.5
+                ]
+              }
             },
             {
               "children": [
@@ -262,6 +245,19 @@
         "name": "Link Hub"
       }
     },
+    "mr-review": {
+      "command": "exec cmux-mr-review --from-action",
+      "icon": {
+        "name": "arrow.triangle.pull",
+        "type": "symbol"
+      },
+      "newWorkspaceMenu": true,
+      "shortcut": "ctrl+cmd+r",
+      "subtitle": "Claude review, MR page, and diff for the MR URL on the clipboard",
+      "target": "newTabInCurrentPane",
+      "title": "MR Review",
+      "type": "command"
+    },
     "product-delivery": {
       "icon": {
         "name": "shippingbox",
@@ -297,11 +293,6 @@
               "pane": {
                 "surfaces": [
                   {
-                    "command": "exec /bin/zsh -lic hunk",
-                    "name": "Hunk",
-                    "type": "terminal"
-                  },
-                  {
                     "name": "Localhost / UAT",
                     "type": "browser",
                     "url": "about:blank"
@@ -315,6 +306,30 @@
         },
         "name": "Product Delivery"
       }
+    },
+    "agents-next-waiting": {
+      "type": "command",
+      "title": "Next Waiting Agent",
+      "subtitle": "Jump to the next agent waiting for your input",
+      "icon": {
+        "type": "symbol",
+        "name": "pause.circle"
+      },
+      "command": "exec cmux-agents next waiting",
+      "target": "newTabInCurrentPane",
+      "shortcut": "ctrl+cmd+j"
+    },
+    "agents-next-done": {
+      "type": "command",
+      "title": "Next Done Agent",
+      "subtitle": "Jump to the next agent that finished a turn",
+      "icon": {
+        "type": "symbol",
+        "name": "checkmark.circle"
+      },
+      "command": "exec cmux-agents next done",
+      "target": "newTabInCurrentPane",
+      "shortcut": "ctrl+cmd+k"
     }
   },
   "activePaneBorderColor": "#c4a7e7",
@@ -349,5 +364,12 @@
   },
   "sidebarAppearance": {
     "matchTerminalBackground": true
+  },
+  "terminal": {
+    "agentHibernation": {
+      "enabled": true,
+      "idleSeconds": 1800,
+      "maxLiveTerminals": 12
+    }
   }
 }

@@ -1,0 +1,8 @@
+# cmux-mr-review projects, one per line:
+#   <host/project-path glob> <label> <local repo path>
+# The glob is matched against the MR URL's host and project path, so `*` can
+# cover a project that moved between groups. The label ends up in the workspace
+# name ("MR !42 server"). Lines starting with # are ignored.
+#
+# gitlab.com/my-group/*/my-server  server  ~/code/my-server
+# gitlab.com/my-group/*/my-web     web     ~/code/my-web

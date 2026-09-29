@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pomodoro</title>
+<style>
+  :root {
+    --base: #232136; --surface: #2a273f; --overlay: #393552;
+    --muted: #6e6a86; --subtle: #908caa; --text: #e0def4;
+    --love: #eb6f92; --gold: #f6c177; --rose: #ea9a97;
+    --pine: #3e8fb0; --foam: #9ccfd8; --iris: #c4a7e7;
+    --a: var(--love); --b: var(--iris);
+    color-scheme: dark;
+  }
+  body[data-mode="short"] { --a: var(--foam); --b: var(--pine); }
+  body[data-mode="long"]  { --a: var(--gold); --b: var(--rose); }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 13px/1.3 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    color: var(--text);
+    background:
+      radial-gradient(120% 90% at 30% 20%, color-mix(in srgb, var(--a) 16%, transparent), transparent 60%),
+      radial-gradient(110% 90% at 80% 100%, color-mix(in srgb, var(--b) 14%, transparent), transparent 60%),
+      var(--base);
+    transition: background 600ms ease;
+    display: flex; align-items: center; justify-content: center;
+    padding: 12px 16px; overflow: hidden; user-select: none;
+  }
+
+  .app { display: flex; flex-direction: column; align-items: center; gap: 10px; width: 100%; }
+
+  .modes { display: flex; gap: 4px; padding: 3px; border-radius: 999px; background: color-mix(in srgb, var(--overlay) 70%, transparent); }
+  .modes button {
+    border: 0; background: transparent; color: var(--subtle); font: inherit; font-size: 11px; font-weight: 600;
+    padding: 4px 10px; border-radius: 999px; cursor: pointer; letter-spacing: .02em;
+  }
+  .modes button[aria-pressed="true"] { color: var(--base); background: linear-gradient(135deg, var(--a), var(--b)); }
+
+  .ring-wrap { position: relative; width: min(64vmin, 230px); aspect-ratio: 1; cursor: pointer; }
+  .ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); overflow: visible; }
+  .track { stroke: color-mix(in srgb, var(--overlay) 85%, transparent); }
+  .progress { filter: drop-shadow(0 0 6px color-mix(in srgb, var(--a) 55%, transparent)); transition: stroke-dashoffset 250ms linear; }
+  .ticks line { stroke: var(--muted); stroke-width: .6; opacity: .5; }
+  .center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; }
+  .time { font: 600 clamp(26px, 13vmin, 48px)/1 "SF Mono", ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .tagline { font-size: 11px; color: var(--subtle); max-width: 80%; text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .state { font-size: 9px; letter-spacing: .14em; text-transform: uppercase; color: var(--a); font-weight: 700; }
+
+  .controls { display: flex; align-items: center; gap: 12px; }
+  .icon {
+    width: 32px; height: 32px; border-radius: 50%; border: 1px solid color-mix(in srgb, var(--muted) 60%, transparent);
+    background: color-mix(in srgb, var(--surface) 80%, transparent); color: var(--subtle); cursor: pointer;
+    display: grid; place-items: center; font-size: 14px;
+  }
+  .icon:hover { color: var(--text); border-color: var(--subtle); }
+  .play {
+    width: 46px; height: 46px; border: 0; color: var(--base); font-size: 18px;
+    background: linear-gradient(135deg, var(--a), var(--b));
+    box-shadow: 0 4px 18px color-mix(in srgb, var(--a) 40%, transparent);
+  }
+  .play:hover { color: var(--base); filter: brightness(1.08); }
+
+  .footer { display: flex; align-items: center; gap: 10px; font-size: 11px; color: var(--subtle); }
+  .dots { display: flex; gap: 5px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--overlay); }
+  .dot.done { background: linear-gradient(135deg, var(--a), var(--b)); }
+  .footer span { white-space: nowrap; }
+  .auto { border: 0; background: none; font: inherit; font-size: 11px; color: var(--muted); cursor: pointer; padding: 0; }
+  .auto[aria-pressed="true"] { color: var(--foam); }
+  .hint { font-size: 10px; color: var(--muted); }
+
+  body.running .ring-wrap { animation: breathe 4s ease-in-out infinite; }
+  @keyframes breathe { 50% { transform: scale(1.012); } }
+  body.flash { animation: flash 1.2s ease-out 2; }
+  @keyframes flash { 30% { box-shadow: inset 0 0 0 3px var(--a); } }
+
+  .side { display: contents; }
+
+  /* Short, wide pane (a third of the Dock): ring left, everything else right. */
+  @media (max-height: 380px) and (min-width: 300px) {
+    .app { flex-direction: row; justify-content: center; gap: 14px; }
+    .ring-wrap { width: min(74vh, 44vw, 220px); flex: none; }
+    .side { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; min-width: 0; }
+    .modes button { padding: 4px 8px; }
+    .hint { display: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body data-mode="focus">
+<div class="app">
+  <div class="ring-wrap" id="ring" title="Click or press Space to start / pause">
+    <svg viewBox="0 0 100 100" aria-hidden="true">
+      <defs>
+        <linearGradient id="grad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="var(--a)"/>
+          <stop offset="1" stop-color="var(--b)"/>
+        </linearGradient>
+      </defs>
+      <g class="ticks" id="ticks"></g>
+      <circle class="track" cx="50" cy="50" r="42" fill="none" stroke-width="5"/>
+      <circle class="progress" id="progress" cx="50" cy="50" r="42" fill="none" stroke="url(#grad)" stroke-width="5" stroke-linecap="round"/>
+    </svg>
+    <div class="center">
+      <div class="state" id="state">Ready</div>
+      <div class="time" id="time">25:00</div>
+      <div class="tagline" id="tagline">Kafa yoruyor</div>
+    </div>
+  </div>
+
+  <div class="side">
+    <div class="modes" role="group" aria-label="Mode">
+      <button data-mode="focus" aria-pressed="true">Focus</button>
+      <button data-mode="short" aria-pressed="false">Break</button>
+      <button data-mode="long" aria-pressed="false">Long</button>
+    </div>
+    <div class="controls">
+      <button class="icon" id="reset" title="Reset (R)">↺</button>
+      <button class="icon play" id="play" title="Start / pause (Space)">▶</button>
+      <button class="icon" id="skip" title="Skip (S)">⏭</button>
+    </div>
+    <div class="footer">
+      <div class="dots" id="dots" title="Focus sessions in this set"></div>
+      <span id="today">Today 0 · 0m</span>
+      <button class="auto" id="auto" aria-pressed="false" title="Auto-start the next session">auto</button>
+    </div>
+    <div class="hint">Space start · R reset · S skip · 1/2/3 mode · ↑↓ minutes</div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const TAGLINES = {
+    focus: ["Kafa yoruyor", "Kodlar ütüleniyor", "Kervan yolda düzülüyor", "Hallediliyor", "Bismillah"],
+    short: ["Çay demleniyor", "Bi nefes", "Göz dinlendiriliyor", "Şükrediliyor"],
+    long:  ["Mahalle kahvesinde", "Halay çekiliyor", "Hayırlısı bekleniyor", "Demleniyor"]
+  };
+  const LABEL = { focus: "Focus", short: "Break", long: "Long break" };
+  const SET_SIZE = 4;
+  const C = 2 * Math.PI * 42;
+
+  const store = {
+    get(key, fallback) { try { const v = localStorage.getItem("pomodoro." + key); return v ? JSON.parse(v) : fallback; } catch { return fallback; } },
+    set(key, value) { try { localStorage.setItem("pomodoro." + key, JSON.stringify(value)); } catch {} }
+  };
+
+  const state = {
+    mode: "focus",
+    running: false,
+    endAt: 0,
+    remaining: 0,
+    setCount: 0,
+    durations: store.get("durations", { focus: 25, short: 5, long: 15 }),
+    auto: store.get("auto", false)
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const progress = $("progress");
+  progress.style.strokeDasharray = C;
+
+  const ticks = $("ticks");
+  for (let i = 0; i < 60; i++) {
+    const a = (i / 60) * 2 * Math.PI, long = i % 5 === 0;
+    const r1 = 48, r2 = long ? 46 : 47;
+    const l = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    l.setAttribute("x1", 50 + r1 * Math.cos(a)); l.setAttribute("y1", 50 + r1 * Math.sin(a));
+    l.setAttribute("x2", 50 + r2 * Math.cos(a)); l.setAttribute("y2", 50 + r2 * Math.sin(a));
+    ticks.appendChild(l);
+  }
+
+  function todayKey() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+  function todayStats() {
+    const s = store.get("today", null);
+    return s && s.date === todayKey() ? s : { date: todayKey(), count: 0, minutes: 0 };
+  }
+
+  const total = () => state.durations[state.mode] * 60000;
+  const pick = (list) => list[Math.floor(Math.random() * list.length)];
+  const fmt = (ms) => {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  };
+
+  function setMode(mode, keepTagline) {
+    state.mode = mode;
+    state.running = false;
+    state.remaining = total();
+    document.body.dataset.mode = mode;
+    document.querySelectorAll(".modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
+    if (!keepTagline) $("tagline").textContent = pick(TAGLINES[mode]);
+    render();
+  }
+
+  function remainingNow() {
+    return state.running ? Math.max(0, state.endAt - Date.now()) : state.remaining;
+  }
+
+  function render() {
+    const rem = remainingNow();
+    const frac = 1 - rem / total();
+    progress.style.strokeDashoffset = C * frac;
+    $("time").textContent = fmt(rem);
+    $("state").textContent = state.running ? LABEL[state.mode] : (rem === total() ? "Ready" : "Paused");
+    $("play").textContent = state.running ? "❚❚" : "▶";
+    document.body.classList.toggle("running", state.running);
+    document.title = `${state.running ? "▶" : "❚❚"} ${fmt(rem)} · ${LABEL[state.mode]}`;
+
+    const dots = $("dots");
+    dots.innerHTML = "";
+    for (let i = 0; i < SET_SIZE; i++) {
+      const d = document.createElement("span");
+      d.className = "dot" + (i < state.setCount ? " done" : "");
+      dots.appendChild(d);
+    }
+    const t = todayStats();
+    $("today").textContent = `Today ${t.count} · ${t.minutes}m`;
+    $("auto").setAttribute("aria-pressed", String(state.auto));
+  }
+
+  let audio;
+  function chime() {
+    try {
+      audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+      const now = audio.currentTime;
+      [[659.25, 0], [783.99, 0.18], [1046.5, 0.36]].forEach(([freq, at]) => {
+        const o = audio.createOscillator(), g = audio.createGain();
+        o.type = "sine"; o.frequency.value = freq;
+        g.gain.setValueAtTime(0.0001, now + at);
+        g.gain.exponentialRampToValueAtTime(0.22, now + at + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + at + 1.1);
+        o.connect(g).connect(audio.destination);
+        o.start(now + at); o.stop(now + at + 1.2);
+      });
+    } catch {}
+  }
+
+  function start() {
+    if (audio && audio.state === "suspended") audio.resume();
+    if (!audio) { try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+    state.endAt = Date.now() + state.remaining;
+    state.running = true;
+    render();
+  }
+  function pause() {
+    state.remaining = remainingNow();
+    state.running = false;
+    render();
+  }
+  const toggle = () => (state.running ? pause() : start());
+
+  function complete(skipped) {
+    if (!skipped) {
+      chime();
+      document.body.classList.remove("flash"); void document.body.offsetWidth; document.body.classList.add("flash");
+    }
+    let next;
+    if (state.mode === "focus") {
+      if (!skipped) {
+        const t = todayStats();
+        t.count += 1; t.minutes += state.durations.focus;
+        store.set("today", t);
+      }
+      state.setCount = Math.min(SET_SIZE, state.setCount + 1);
+      next = state.setCount >= SET_SIZE ? "long" : "short";
+    } else {
+      if (state.mode === "long") state.setCount = 0;
+      next = "focus";
+    }
+    setMode(next);
+    if (state.auto && !skipped) start();
+  }
+
+  setInterval(() => {
+    if (state.running && remainingNow() <= 0) complete(false);
+    else if (state.running) render();
+  }, 250);
+
+  $("ring").addEventListener("click", toggle);
+  $("play").addEventListener("click", toggle);
+  $("reset").addEventListener("click", () => setMode(state.mode, true));
+  $("skip").addEventListener("click", () => complete(true));
+  $("auto").addEventListener("click", () => { state.auto = !state.auto; store.set("auto", state.auto); render(); });
+  document.querySelectorAll(".modes button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
+
+  document.addEventListener("keydown", (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === " ") { e.preventDefault(); toggle(); }
+    else if (k === "r") setMode(state.mode, true);
+    else if (k === "s") complete(true);
+    else if (k === "1") setMode("focus");
+    else if (k === "2") setMode("short");
+    else if (k === "3") setMode("long");
+    else if ((k === "arrowup" || k === "arrowdown") && !state.running) {
+      e.preventDefault();
+      const d = state.durations[state.mode] + (k === "arrowup" ? 1 : -1);
+      state.durations[state.mode] = Math.min(90, Math.max(1, d));
+      store.set("durations", state.durations);
+      setMode(state.mode, true);
+    }
+  });
+
+  setMode("focus");
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+# List cmux agent sessions by what they need from you, and jump between them.
+#
+#   cmux-agents list [--json]          waiting / done / stale agents in open tabs
+#   cmux-agents next waiting|done|stale jump to the next agent in that group
+#
+# Groups: waiting = needs your input (last 48h), done = finished a turn (last
+# 48h), stale = idle or waiting for more than 48h. Running agents are left out.
+# Only reads cmux's saved session records and the process table, so `list`
+# also works outside cmux (the sidebar dashboard runs it from launchd).
+#
+# Overrides (used by the tests): CMUX_AGENTS_SESSIONS_JSON, CMUX_AGENTS_STATE_FILE,
+# CMUX_AGENTS_PROMPTS_FILE, CMUX_AGENTS_PS_FILE, CMUX_AGENTS_NOW,
+# CMUX_AGENTS_CURSOR_DIR, CMUX_AGENTS_CMUX, CMUX_AGENTS_STALE_SECONDS.
+
+set -u
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+cmux_bin="${CMUX_AGENTS_CMUX:-${CMUX_BUNDLED_CLI_PATH:-$(command -v cmux 2>/dev/null || true)}}"
+state_file="${CMUX_AGENTS_STATE_FILE:-$HOME/Library/Application Support/cmux/session-com.cmuxterm.app.json}"
+prompts_file="${CMUX_AGENTS_PROMPTS_FILE:-$HOME/.config/cmux/agent-prompts.json}"
+cursor_dir="${CMUX_AGENTS_CURSOR_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cmux-dashboard/agents-cursor}"
+stale_seconds="${CMUX_AGENTS_STALE_SECONDS:-172800}"
+now="${CMUX_AGENTS_NOW:-$(date +%s)}"
+
+command -v jq >/dev/null 2>&1 || { echo "cmux-agents: jq is required" >&2; exit 1; }
+
+usage() {
+  echo "usage: cmux-agents list [--json] | next waiting|done|stale" >&2
+  exit 2
+}
+
+sessions_json() {
+  if [ -n "${CMUX_AGENTS_SESSIONS_JSON:-}" ]; then
+    cat "$CMUX_AGENTS_SESSIONS_JSON"
+  else
+    "$cmux_bin" sessions --all --json 2>/dev/null || printf '{"sessions": []}'
+  fi
+}
+
+# One line per process: pid, then the RSS (kB) of it and all its descendants.
+tree_rss() {
+  { if [ -n "${CMUX_AGENTS_PS_FILE:-}" ]; then cat "$CMUX_AGENTS_PS_FILE"; else ps -A -o pid=,ppid=,rss=; fi; } |
+    awk '
+      { rss[$1] = $3; kids[$2] = kids[$2] " " $1 }
+      function total(p,   n, list, i, sum) {
+        sum = rss[p]; n = split(kids[p], list, " ")
+        for (i = 1; i <= n; i++) sum += total(list[i])
+        return sum
+      }
+      END { for (p in rss) print p, total(p) }
+    '
+}
+
+buckets() {
+  local rss_file
+  rss_file=$(mktemp)
+  tree_rss | jq -R 'split(" ") | {key: .[0], value: (.[1] | tonumber)}' | jq -s 'from_entries' > "$rss_file"
+
+  local state='{}' prompts='{}'
+  [ -f "$state_file" ] && state=$(cat "$state_file")
+  [ -f "$prompts_file" ] && prompts=$(cat "$prompts_file")
+
+  sessions_json | jq \
+    --argjson now "$now" \
+    --argjson stale "$stale_seconds" \
+    --argjson state "$state" \
+    --argjson prompts "$prompts" \
+    --slurpfile rss "$rss_file" '
+    ([$state.windows[]?.tabManager.workspaces[]?] ) as $workspaces
+    | ([$workspaces[] | .workspaceId as $w | (.customTitle // .processTitle // "") as $t
+        | .panels[]? | {key: .id, value: {workspace_id: $w, workspace: $t, title: (.title // "")}}] | from_entries) as $open
+    | [.sessions[]?
+        | select((.agent == "claude" or .agent == "codex") and ((.surface_id // "") != "") and $open[.surface_id] != null)]
+    | group_by(.surface_id) | map(max_by(.updated_at_unix // 0))
+    | map(
+        . as $s | $open[$s.surface_id] as $tab
+        | ($tab.title | sub("^[^\\p{L}\\p{N}]+"; "")) as $clean
+        | {
+            surface_id: $s.surface_id,
+            workspace_id: $tab.workspace_id,
+            workspace: $tab.workspace,
+            agent: $s.agent,
+            lifecycle: $s.agent_lifecycle,
+            updated_at: (($s.updated_at_unix // 0) | floor),
+            age: ($now - (($s.updated_at_unix // 0) | floor)),
+            title: (if ($clean == "" or ($clean | ascii_downcase | test("^(claude code|claude|codex)$")))
+                    then ($prompts[$s.surface_id].prompt // (if $s.agent == "codex" then "Codex" else "Claude" end))
+                    else $clean end),
+            rss_kb: ($rss[0][($s.pid // "" | tostring)] // 0)
+          })
+    | map(select(.lifecycle != "running")) as $all
+    | {
+        generated_at: $now,
+        waiting: ($all | map(select(.lifecycle == "needsInput" and .age <= $stale)) | sort_by(.updated_at)),
+        done: ($all | map(select(.lifecycle == "idle" and .age <= $stale)) | sort_by(.updated_at) | reverse),
+        stale: ($all | map(select(.age > $stale)) | sort_by(.updated_at))
+      }
+    | .stale_rss_kb = ([.stale[].rss_kb] | add // 0)
+  '
+  rm -f "$rss_file"
+}
+
+age_text() {
+  local s="$1"
+  if [ "$s" -lt 3600 ]; then echo "$((s / 60))m"
+  elif [ "$s" -lt 172800 ]; then echo "$((s / 3600))h"
+  else echo "$((s / 86400))d"; fi
+}
+
+cmd_list() {
+  local data
+  data=$(buckets)
+  if [ "${1:-}" = "--json" ]; then
+    printf '%s\n' "$data"
+    return
+  fi
+  for group in waiting done stale; do
+    printf '%s (%s)\n' "$group" "$(printf '%s' "$data" | jq --arg g "$group" '.[$g] | length')"
+    printf '%s' "$data" | jq -r --arg g "$group" '.[$g][] | [.age, .workspace, .title, .rss_kb] | @tsv' |
+      while IFS=$'\t' read -r age workspace title rss; do
+        printf '  %-5s %-22.22s %-50.50s %s MB\n' "$(age_text "$age")" "$workspace" "$title" "$((rss / 1024))"
+      done
+  done
+}
+
+cmd_next() {
+  local group="${1:-}"
+  case "$group" in waiting|done|stale) ;; *) usage ;; esac
+
+  local items count
+  items=$(buckets | jq -c --arg g "$group" '[.[$g][] | {surface_id, workspace_id}]')
+  count=$(printf '%s' "$items" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    "$cmux_bin" notify --title "No agents $group" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  mkdir -p "$cursor_dir"
+  local cursor_file="$cursor_dir/$group" last="" target
+  [ -f "$cursor_file" ] && last=$(cat "$cursor_file")
+  target=$(printf '%s' "$items" | jq -c --arg last "$last" '
+    (map(.surface_id) | index($last)) as $i
+    | if $i == null then .[0] else .[($i + 1) % length] end')
+
+  local surface workspace
+  surface=$(printf '%s' "$target" | jq -r '.surface_id')
+  workspace=$(printf '%s' "$target" | jq -r '.workspace_id')
+  printf '%s' "$surface" > "$cursor_file"
+
+  "$cmux_bin" select-workspace --workspace "$workspace" >/dev/null 2>&1
+  "$cmux_bin" focus-panel --panel "$surface" --workspace "$workspace" >/dev/null 2>&1
+}
+
+case "${1:-}" in
+  list) shift; cmd_list "$@" ;;
+  next) shift; cmd_next "$@" ;;
+  *) usage ;;
+esac

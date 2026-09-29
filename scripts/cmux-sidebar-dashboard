@@ -410,6 +410,39 @@ $(printf '%s' "$all_sessions" | "$jq_bin" -r --slurpfile live "$live_surfaces_fi
 ' 2>/dev/null)
 EOF
 
+# Agents row: waiting / done / stale groups from scripts/cmux-agents. Each group
+# is a menu whose items jump to that agent's tab (select workspace, then focus).
+agents_bin="$(cd "$(dirname "$0")" 2>/dev/null && pwd)/cmux-agents"
+[ -x "$agents_bin" ] || agents_bin=$(command -v cmux-agents 2>/dev/null || true)
+agents_row=""
+if [ -n "$agents_bin" ] && [ -n "$all_sessions" ]; then
+  agents_sessions=$(mktemp "$cache_dir/agents-sessions.XXXXXX")
+  printf '%s' "$all_sessions" > "$agents_sessions"
+  agents_row=$(CMUX_AGENTS_SESSIONS_JSON="$agents_sessions" "$agents_bin" list --json 2>/dev/null | "$jq_bin" -r '
+    def age: if . < 3600 then "\(. / 60 | floor)m" elif . < 172800 then "\(. / 3600 | floor)h" else "\(. / 86400 | floor)d" end;
+    def size: if . >= 1048576 then "\(. / 104857.6 | floor / 10) GB" else "\(. / 1024 | floor) MB" end;
+    def group($label; $items; $help):
+      if ($items | length) == 0 then
+        "    Text(\(($label + " 0") | @json)).font(.system(size: 10)).foregroundColor(.secondary).help(\($help | @json))"
+      else
+        "    Menu(\(($label + " \($items | length)") | @json)) {\n"
+        + ($items[:15] | map(
+            "      Button(\(("\(.workspace) · \(.title | if length > 60 then .[:59] + "…" else . end) · \(.age | age)" + (if .rss_kb > 0 then " · \(.rss_kb | size)" else "" end)) | @json)) {\n"
+            + "        cmux(\"workspace.select\", workspace_id: \(.workspace_id | @json))\n"
+            + "        cmux(\"surface.focus\", surface_id: \(.surface_id | @json))\n"
+            + "      }\n") | join(""))
+        + "    }\n    .font(.system(size: 10)).help(\($help | @json))"
+      end;
+    "  HStack(spacing: 8) {\n"
+    + "    Text(\"Agents\").font(.system(size: 9)).fontWeight(.semibold).textCase(.uppercase).foregroundColor(.secondary)\n"
+    + group("⏸"; .waiting; "Waiting for your input, oldest first · ⌃⌘J jumps to the next") + "\n"
+    + group("✓"; .done; "Finished a turn in the last 48h, newest first · ⌃⌘K jumps to the next") + "\n"
+    + group(if .stale_rss_kb > 0 then "💤 \(.stale_rss_kb | size) ·" else "💤" end; .stale; "Idle or waiting for more than 48h, oldest first · close the ones you do not need") + "\n"
+    + "    Spacer()\n  }\n  .padding(.horizontal, 6)\n\n  Divider()\n"
+  ' 2>/dev/null || true)
+  rm -f "$agents_sessions"
+fi
+
 # Last submitted prompt per surface, recorded by scripts/agent_prompt_pin.py.
 prompt_store="$HOME/.config/cmux/agent-prompts.json"
 prompt_text_cases=""
@@ -451,7 +484,19 @@ if [ "$notes_total" -gt "$notes_max_lines" ]; then
   notes_more="      Text(\"+$((notes_total - notes_max_lines)) more\").font(.system(size: 8, design: .monospaced)).foregroundColor(.secondary)
 "
 fi
-notes_url="file://$(swift_escape "$notes_file")"
+# Resolve symlinks so notes.md can point into an Obsidian vault. Inside a vault
+# (an ancestor holds .obsidian/) open through Obsidian's URI, which lands on the
+# note; a bare file:// URL only launches the app.
+notes_real=$(cd "$(dirname "$notes_file")" 2>/dev/null && python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$notes_file" 2>/dev/null || printf '%s' "$notes_file")
+notes_url="file://$(swift_escape "$notes_real")"
+probe_dir=$(dirname "$notes_real")
+while [ "$probe_dir" != "/" ] && [ -n "$probe_dir" ]; do
+  if [ -d "$probe_dir/.obsidian" ]; then
+    notes_url="obsidian://open?path=$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$notes_real")"
+    break
+  fi
+  probe_dir=$(dirname "$probe_dir")
+done
 
 candidate_file=$(mktemp "$cache_dir/productivity.swift.XXXXXX")
 
@@ -617,6 +662,7 @@ VStack(alignment: .leading, spacing: 7) {
 
   Divider()
 
+${agents_row}
   Reorderable(workspaces.prefix(24), move: "workspace.reorder") { w in
     workspaceRow(w)
   }

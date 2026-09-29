@@ -1,0 +1,7 @@
+{
+  "controls": [
+    { "id": "music", "title": "YouTube Music", "type": "browser", "url": "https://music.youtube.com/" },
+    { "id": "pomodoro", "title": "Pomodoro", "type": "browser", "url": "file://__HOME__/.config/cmux/dock/pomodoro.html", "chrome": false },
+    { "id": "agent", "title": "general purpose agent", "command": "codex", "cwd": "." }
+  ]
+}

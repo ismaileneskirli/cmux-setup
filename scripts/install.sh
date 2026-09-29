@@ -24,20 +24,33 @@ backup_file() {
   fi
 }
 
-mkdir -p "$home_dir/.config/cmux" "$home_dir/.config/ghostty" \
+mkdir -p "$home_dir/.config/cmux" "$home_dir/.config/cmux/dock" "$home_dir/.config/ghostty" \
   "$home_dir/.cmux/hooks" "$home_dir/.local/bin" "$home_dir/Library/LaunchAgents" \
   "$home_dir/Library/Sounds"
 
 backup_file "$home_dir/.config/cmux/cmux.json"
 backup_file "$home_dir/.config/ghostty/config"
 backup_file "$home_dir/.local/bin/cmux-sidebar-dashboard"
+backup_file "$home_dir/.local/bin/cmux-mr-review"
+backup_file "$home_dir/.local/bin/cmux-agents"
 
 sed "s|__HOME__|$home_dir|g" "$repo_root/config/cmux.json" > "$home_dir/.config/cmux/cmux.json"
 cp "$repo_root/config/ghostty.config" "$home_dir/.config/ghostty/config"
 cp "$repo_root/hooks/"*.sh "$home_dir/.cmux/hooks/"
 cp "$repo_root/scripts/cmux-sidebar-dashboard" "$home_dir/.local/bin/cmux-sidebar-dashboard"
+cp "$repo_root/scripts/cmux-mr-review" "$home_dir/.local/bin/cmux-mr-review"
+cp "$repo_root/scripts/cmux-agents" "$home_dir/.local/bin/cmux-agents"
+if [[ ! -e "$home_dir/.config/cmux/mr-review.conf" ]]; then
+  cp "$repo_root/config/mr-review.conf.example" "$home_dir/.config/cmux/mr-review.conf"
+fi
 cp "$repo_root/assets/sounds/"*.wav "$home_dir/Library/Sounds/"
-chmod +x "$home_dir/.local/bin/cmux-sidebar-dashboard" "$home_dir/.cmux/hooks/"*.sh
+cp "$repo_root/dock/pomodoro.html" "$home_dir/.config/cmux/dock/pomodoro.html"
+if [[ ! -e "$home_dir/.config/cmux/dock.json" ]]; then
+  sed "s|__HOME__|$home_dir|g" "$repo_root/dock/dock.json.example" > "$home_dir/.config/cmux/dock.json"
+fi
+chmod +x "$home_dir/.local/bin/cmux-sidebar-dashboard" "$home_dir/.local/bin/cmux-mr-review" \
+  "$home_dir/.local/bin/cmux-agents" \
+  "$home_dir/.cmux/hooks/"*.sh
 
 sed "s|__HOME__|$home_dir|g; s|__UID__|$(id -u)|g" \
   "$repo_root/launchd/com.eneskirli.cmux-sidebar-dashboard.plist.template" \

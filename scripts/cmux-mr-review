@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# Open a cmux workspace for reviewing a GitLab merge request:
+#   Claude (focused) | MR page in a browser
+#                    | MR diff in the cmux diff viewer
+#
+# Usage: cmux-mr-review [--from-action] [MR_URL]   (default: the clipboard)
+#   --from-action  used by the cmux action: on failure, keep the launcher tab
+#                  open with the error until a key is pressed.
+#
+# Projects are mapped to local repositories in a config file
+# (default ~/.config/cmux/mr-review.conf, override with CMUX_MR_REVIEW_CONFIG).
+# One project per line: <host/project-path glob> <label> <local repo path>
+#   gitlab.com/my-group/*/my-server  server  ~/code/my-server
+
+set -uo pipefail
+export CMUX_QUIET=1
+
+config="${CMUX_MR_REVIEW_CONFIG:-$HOME/.config/cmux/mr-review.conf}"
+from_action=0
+if [ "${1:-}" = "--from-action" ]; then
+  from_action=1
+  shift
+fi
+
+notify() { # <subtitle> <body> [cmux notify target flags...]
+  local subtitle="$1" body="$2"
+  shift 2
+  cmux notify --title "MR Review" --subtitle "$subtitle" --body "$body" "$@" >/dev/null 2>&1 || true
+}
+
+fail() { # <subtitle> <body>
+  printf 'cmux-mr-review: %s: %s\n' "$1" "$2" >&2
+  notify "$1" "$2"
+  if [ "$from_action" = 1 ]; then
+    # cmux shows no banner for the focused surface, so keep the error on screen.
+    printf '\nPress any key to close.' >&2
+    read -rsn1 || true
+  fi
+  exit 1
+}
+
+command -v jq >/dev/null 2>&1 || fail "Missing dependency" "jq is not installed."
+
+url="${1:-$(pbpaste 2>/dev/null)}"
+url="${url#"${url%%[![:space:]]*}"}"
+url="${url%"${url##*[![:space:]]}"}"
+[ -n "$url" ] || fail "Clipboard is empty" "Copy a GitLab merge request URL, then try again."
+
+# Restricted character sets keep the URL safe to embed in a shell command.
+re='^https://([A-Za-z0-9.-]+(:[0-9]+)?)/([A-Za-z0-9._/-]+)/-/merge_requests/([0-9]+)([/?#].*)?$'
+[[ "$url" =~ $re ]] || fail "Not a merge request URL" "${url:0:120}"
+host="${BASH_REMATCH[1]}"
+project="${BASH_REMATCH[3]}"
+iid="${BASH_REMATCH[4]}"
+mr_url="https://$host/$project/-/merge_requests/$iid"
+
+[ -r "$config" ] || fail "No project config" "Create $config (see the cmux-setup README)."
+label="" repo=""
+while read -r pattern entry_label entry_repo || [ -n "$pattern" ]; do
+  case "$pattern" in '' | '#'*) continue ;; esac
+  # shellcheck disable=SC2053  # $pattern is intentionally a glob
+  if [[ "$host/$project" == $pattern ]]; then
+    label="$entry_label"
+    repo="${entry_repo/#\~/$HOME}"
+    break
+  fi
+done <"$config"
+[ -n "$repo" ] || fail "Unsupported project" "$host/$project is not listed in $config."
+[ -d "$repo" ] || fail "Repository not found" "$repo does not exist."
+
+claude_cmd="claude --permission-mode auto 'code review and /babysit-mr $mr_url'"
+layout="$(jq -nc --arg cmd "$claude_cmd" --arg url "$mr_url" --arg tab "MR !$iid" '{
+  direction: "horizontal", split: 0.5, children: [
+    {pane: {surfaces: [{type: "terminal", name: "Claude", command: $cmd, focus: true}]}},
+    {pane: {surfaces: [{type: "browser", name: $tab, url: $url}]}}
+  ]}')"
+
+created="$(cmux --json --id-format both workspace create --name "MR !$iid $label" \
+  --cwd "$repo" --layout "$layout" --focus true)" ||
+  fail "Could not create workspace" "cmux workspace create failed."
+ws="$(jq -r '.workspace_id' <<<"$created")"
+
+tree="$(cmux --json --id-format both tree --workspace "$ws")"
+pane_of() { jq -r --arg ws "$ws" --arg type "$1" '.windows[].workspaces[] | select(.id == $ws)
+  | .panes[] | select(any(.surfaces[]; .type == $type)) | .id' <<<"$tree" | head -n 1; }
+claude_pane="$(pane_of terminal)"
+browser_pane="$(pane_of browser)"
+browser_surface="$(jq -r --arg ws "$ws" '.windows[].workspaces[] | select(.id == $ws)
+  | .panes[].surfaces[] | select(.type == "browser") | .id' <<<"$tree" | head -n 1)"
+
+# The diff is best effort: Claude and the MR page are already open. The notice
+# goes on the (unfocused) MR page so cmux marks it instead of swallowing it.
+diff_fail() {
+  printf 'cmux-mr-review: diff unavailable: %s\n' "$1" >&2
+  notify "Diff unavailable for !$iid" "$1" --workspace "$ws" ${browser_surface:+--surface "$browser_surface"}
+  exit 0
+}
+
+[ -n "$browser_surface" ] || diff_fail "Could not find the MR page in the new workspace."
+command -v glab >/dev/null 2>&1 || diff_fail "glab is not installed."
+patch="$(mktemp -t cmux-mr-review)" || diff_fail "Could not create a temp file."
+trap 'rm -f "$patch" "$patch.err"' EXIT
+encoded_project="$(jq -rn --arg p "$project" '$p | @uri')"
+if ! glab api --hostname "$host" "projects/$encoded_project/merge_requests/$iid/raw_diffs" \
+  >"$patch" 2>"$patch.err"; then
+  if grep -q '401' "$patch.err"; then
+    diff_fail "glab is not authenticated for $host (run: glab auth login)."
+  fi
+  diff_fail "glab: $(head -n 1 "$patch.err")"
+fi
+[ -s "$patch" ] || diff_fail "The merge request has no changes."
+
+# cmux diff always splits to the right of its source surface; move the viewer
+# under the MR page so the layout is Claude | (MR page / diff).
+opened="$(cmux --json --id-format both diff - --workspace "$ws" --surface "$browser_surface" \
+  --title "!$iid" --no-focus <"$patch" 2>&1)" || diff_fail "cmux diff: $opened"
+diff_surface="$(jq -r '.surface_id' <<<"$opened")"
+cmux move-surface --surface "$diff_surface" --workspace "$ws" --pane "$browser_pane" --focus false >/dev/null &&
+  cmux split-off --surface "$diff_surface" --workspace "$ws" down >/dev/null
+
+# Moving the viewer takes pane focus; hand it back to Claude unless the user
+# already switched to another workspace (focus-pane would pull them back).
+selected="$(cmux --json --id-format both tree | jq -r '.windows[] | select(.current) | .selected_workspace_id')"
+if [ "$selected" = "$ws" ]; then
+  cmux focus-pane --pane "$claude_pane" --workspace "$ws" >/dev/null
+fi
